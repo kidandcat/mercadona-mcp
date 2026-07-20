@@ -1,0 +1,23 @@
+[Unit]
+Description=Mercadona MCP hosted service (web + HTTP MCP)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mercadona-mcp
+Group=mercadona-mcp
+WorkingDirectory=/opt/mercadona-mcp
+ExecStart=/opt/mercadona-mcp/mercadona-mcp serve
+EnvironmentFile=/etc/mercadona-mcp/mercadona-mcp.env
+Restart=on-failure
+RestartSec=3
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/mercadona-mcp
+
+[Install]
+WantedBy=multi-user.target

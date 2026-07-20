@@ -125,6 +125,89 @@ func (c *Client) Login(ctx context.Context, username, password string) (*Session
 	return decodeSession(raw)
 }
 
+// PostalChange is the result of setting a customer's postal code.
+type PostalChange struct {
+	PostalCode string
+	Warehouse  string
+	// WarehouseChanged is true when Mercadona reassigned the cart warehouse.
+	WarehouseChanged bool
+}
+
+// ChangePostalCode sets the delivery postal code for the authenticated session.
+// PUT /postal-codes/actions/change-pc/ with {"new_postal_code":"28022"}.
+// Warehouse is read from the response header x-customer-wh.
+func (c *Client) ChangePostalCode(ctx context.Context, s *Session, postalCode string) (*PostalChange, error) {
+	postalCode = strings.TrimSpace(postalCode)
+	if postalCode == "" {
+		return nil, fmt.Errorf("mercadona: empty postal_code")
+	}
+	body, _ := json.Marshal(map[string]string{"new_postal_code": postalCode})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+"/postal-codes/actions/change-pc/", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("mercadona: build change-pc: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.auth(req, s)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("mercadona: change-pc http: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, ErrUnauthorized
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("mercadona: change-pc http %d: %s", resp.StatusCode, truncate(string(raw), 300))
+	}
+	var parsed struct {
+		WarehouseChanged bool `json:"warehouse_changed"`
+	}
+	_ = json.Unmarshal(raw, &parsed)
+	wh := strings.TrimSpace(resp.Header.Get("x-customer-wh"))
+	pc := strings.TrimSpace(resp.Header.Get("x-customer-pc"))
+	if pc == "" {
+		pc = postalCode
+	}
+	return &PostalChange{
+		PostalCode:       pc,
+		Warehouse:        wh,
+		WarehouseChanged: parsed.WarehouseChanged,
+	}, nil
+}
+
+// ResolvePostalCode validates a postal code anonymously and returns the warehouse id.
+// Same endpoint as ChangePostalCode without auth — used for UI validation.
+func (c *Client) ResolvePostalCode(ctx context.Context, postalCode string) (*PostalChange, error) {
+	postalCode = strings.TrimSpace(postalCode)
+	if postalCode == "" {
+		return nil, fmt.Errorf("mercadona: empty postal_code")
+	}
+	body, _ := json.Marshal(map[string]string{"new_postal_code": postalCode})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, c.baseURL+"/postal-codes/actions/change-pc/", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("mercadona: build resolve-pc: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("mercadona: resolve-pc http: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("mercadona: invalid postal code %q (%d): %s", postalCode, resp.StatusCode, truncate(string(raw), 200))
+	}
+	return &PostalChange{
+		PostalCode: strings.TrimSpace(resp.Header.Get("x-customer-pc")),
+		Warehouse:  strings.TrimSpace(resp.Header.Get("x-customer-wh")),
+	}, nil
+}
+
 // Refresh exchanges a refresh_token for a new access token (and rotated refresh).
 // POST /auth/tokens/ with {"refresh_token": "..." } — no captcha, headless-friendly.
 func (c *Client) Refresh(ctx context.Context, refreshToken string) (*Session, error) {

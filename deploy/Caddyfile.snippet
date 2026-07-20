@@ -1,0 +1,8 @@
+# Primary product domain (also serves www + mentasystems alias).
+mercadona.cc, www.mercadona.cc, mercadona.mentasystems.com {
+	encode gzip
+	reverse_proxy 127.0.0.1:8086
+
+	@api path /api/* /mcp /mcp/*
+	header @api Cache-Control "no-store"
+}

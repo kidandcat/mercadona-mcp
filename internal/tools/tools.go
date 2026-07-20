@@ -11,6 +11,7 @@ import (
 )
 
 // Register attaches all mercadona_* tools to the MCP server.
+// svc must already be scoped to the correct account (local or hosted).
 func Register(s *mcp.Server, svc *service.Service) {
 	s.Register(mcp.Tool{
 		Name: "mercadona_search",

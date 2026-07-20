@@ -1,5 +1,8 @@
 // Package service is the stateful façade used by the MCP tools: session
 // persistence, ambiguity resolution, alias bookkeeping, and cart mutations.
+//
+// Each Service instance is scoped to one accountID ("local" for stdio env mode,
+// or a hosted connection id).
 package service
 
 import (
@@ -12,18 +15,46 @@ import (
 	"strings"
 
 	"github.com/kidandcat/mercadona-mcp/internal/client"
+	"github.com/kidandcat/mercadona-mcp/internal/store"
 )
 
-// Service owns the Mercadona client + local SQLite state.
+// Service owns the Mercadona client + local SQLite state for one account.
 type Service struct {
-	db     *sql.DB
-	client *client.Client
+	db        *sql.DB
+	client    *client.Client
+	accountID string
+
+	// Optional: when set, session load/save goes through the account row
+	// (encrypted tokens) instead of mercadona_session / env.
+	accountStore AccountStore
 }
 
-// New wraps db with a Mercadona client.
-func New(db *sql.DB) *Service {
-	return &Service{db: db, client: client.New()}
+// AccountStore loads and persists Mercadona session tokens for a hosted account.
+type AccountStore interface {
+	LoadSession(ctx context.Context, accountID string) (*client.Session, error)
+	SaveSession(ctx context.Context, accountID string, sess *client.Session) error
+	Touch(ctx context.Context, accountID string) error
 }
+
+// New wraps db with a Mercadona client for the given account (use store.LocalAccountID for stdio).
+func New(db *sql.DB, accountID string) *Service {
+	if accountID == "" {
+		accountID = store.LocalAccountID
+	}
+	return &Service{db: db, client: client.New(), accountID: accountID}
+}
+
+// WithAccountStore enables hosted multi-tenant session persistence.
+func (s *Service) WithAccountStore(as AccountStore) *Service {
+	s.accountStore = as
+	return s
+}
+
+// Client returns the underlying Mercadona HTTP client (for postal resolution etc.).
+func (s *Service) Client() *client.Client { return s.client }
+
+// AccountID returns the scoped account id.
+func (s *Service) AccountID() string { return s.accountID }
 
 // AddResult is the structured result for mercadona_add.
 type AddResult struct {
@@ -47,6 +78,41 @@ type Alias struct {
 }
 
 func (s *Service) getSession(ctx context.Context, forceRefresh bool) (*client.Session, error) {
+	if s.accountStore != nil {
+		if !forceRefresh {
+			sess, err := s.accountStore.LoadSession(ctx, s.accountID)
+			if err == nil {
+				return sess, nil
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return nil, err
+			}
+		}
+		// Hosted accounts must already have tokens; re-auth via refresh only.
+		sess, err := s.accountStore.LoadSession(ctx, s.accountID)
+		if err != nil {
+			return nil, fmt.Errorf("session: %w", err)
+		}
+		if sess.RefreshToken == "" {
+			return nil, fmt.Errorf("session expired — reconnect your Mercadona account on the website")
+		}
+		refreshed, err := s.client.Refresh(ctx, sess.RefreshToken)
+		if err != nil {
+			return nil, fmt.Errorf("refresh: %w", err)
+		}
+		if refreshed.RefreshToken == "" {
+			refreshed.RefreshToken = sess.RefreshToken
+		}
+		if refreshed.CustomerID == "" {
+			refreshed.CustomerID = sess.CustomerID
+		}
+		if err := s.accountStore.SaveSession(ctx, s.accountID, refreshed); err != nil {
+			return nil, err
+		}
+		return refreshed, nil
+	}
+
+	// Local / stdio mode.
 	if !forceRefresh {
 		var sess client.Session
 		err := s.db.QueryRowContext(ctx, `
@@ -60,24 +126,19 @@ func (s *Service) getSession(ctx context.Context, forceRefresh bool) (*client.Se
 			return nil, fmt.Errorf("session load: %w", err)
 		}
 	}
-	return s.authenticate(ctx)
+	return s.authenticateLocal(ctx)
 }
 
-// authenticate obtains a session using (in order):
-//  1. MERCADONA_REFRESH_TOKEN (preferred, headless)
-//  2. MERCADONA_ACCESS_TOKEN + MERCADONA_CUSTOMER_ID (one-shot, no refresh)
-//  3. MERCADONA_USER + MERCADONA_PASS (password login; may require captcha in some cases)
-func (s *Service) authenticate(ctx context.Context) (*client.Session, error) {
+func (s *Service) authenticateLocal(ctx context.Context) (*client.Session, error) {
 	if rt := strings.TrimSpace(os.Getenv("MERCADONA_REFRESH_TOKEN")); rt != "" {
 		sess, err := s.client.Refresh(ctx, rt)
 		if err != nil {
 			return nil, fmt.Errorf("refresh token: %w", err)
 		}
-		// Keep the env refresh if the API didn't rotate one back.
 		if sess.RefreshToken == "" {
 			sess.RefreshToken = rt
 		}
-		if err := s.saveSession(ctx, sess); err != nil {
+		if err := s.saveLocalSession(ctx, sess); err != nil {
 			return nil, err
 		}
 		return sess, nil
@@ -91,7 +152,7 @@ func (s *Service) authenticate(ctx context.Context) (*client.Session, error) {
 			RefreshToken: strings.TrimSpace(os.Getenv("MERCADONA_REFRESH_TOKEN")),
 			CustomerID:   customer,
 		}
-		if err := s.saveSession(ctx, sess); err != nil {
+		if err := s.saveLocalSession(ctx, sess); err != nil {
 			return nil, err
 		}
 		return sess, nil
@@ -106,13 +167,13 @@ func (s *Service) authenticate(ctx context.Context) (*client.Session, error) {
 	if err != nil {
 		return nil, fmt.Errorf("login: %w", err)
 	}
-	if err := s.saveSession(ctx, sess); err != nil {
+	if err := s.saveLocalSession(ctx, sess); err != nil {
 		return nil, err
 	}
 	return sess, nil
 }
 
-func (s *Service) saveSession(ctx context.Context, sess *client.Session) error {
+func (s *Service) saveLocalSession(ctx context.Context, sess *client.Session) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO mercadona_session (id, access_token, refresh_token, customer_id, updated_at)
 		VALUES (1, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -128,6 +189,13 @@ func (s *Service) saveSession(ctx context.Context, sess *client.Session) error {
 	return nil
 }
 
+func (s *Service) saveSession(ctx context.Context, sess *client.Session) error {
+	if s.accountStore != nil {
+		return s.accountStore.SaveSession(ctx, s.accountID, sess)
+	}
+	return s.saveLocalSession(ctx, sess)
+}
+
 func withRetry[T any](s *Service, ctx context.Context, op func(*client.Session) (T, error)) (T, error) {
 	var zero T
 	sess, err := s.getSession(ctx, false)
@@ -136,17 +204,22 @@ func withRetry[T any](s *Service, ctx context.Context, op func(*client.Session) 
 	}
 	out, err := op(sess)
 	if err == nil {
+		if s.accountStore != nil {
+			_ = s.accountStore.Touch(ctx, s.accountID)
+		}
 		return out, nil
 	}
 	if !errors.Is(err, client.ErrUnauthorized) {
 		return zero, err
 	}
-	// Prefer refresh_token over full re-login.
 	if sess.RefreshToken != "" {
 		refreshed, rerr := s.client.Refresh(ctx, sess.RefreshToken)
 		if rerr == nil {
 			if refreshed.RefreshToken == "" {
 				refreshed.RefreshToken = sess.RefreshToken
+			}
+			if refreshed.CustomerID == "" {
+				refreshed.CustomerID = sess.CustomerID
 			}
 			if serr := s.saveSession(ctx, refreshed); serr != nil {
 				return zero, serr
@@ -191,11 +264,11 @@ func (s *Service) Add(ctx context.Context, text string, qty float64) (*AddResult
 	}
 	lowered := strings.ToLower(text)
 
-	// 1) exact alias hit
 	var aliasID, aliasName string
 	err := s.db.QueryRowContext(ctx, `
-		SELECT product_id, product_name FROM grocery_aliases WHERE alias = ?
-	`, lowered).Scan(&aliasID, &aliasName)
+		SELECT product_id, product_name FROM grocery_aliases
+		WHERE account_id = ? AND alias = ?
+	`, s.accountID, lowered).Scan(&aliasID, &aliasName)
 	if err == nil {
 		avail, aerr := s.productAvailable(ctx, aliasID)
 		if aerr != nil {
@@ -208,8 +281,9 @@ func (s *Service) Add(ctx context.Context, text string, qty float64) (*AddResult
 				return nil, err
 			}
 			_, _ = s.db.ExecContext(ctx, `
-				UPDATE grocery_aliases SET use_count = use_count + 1, last_used = CURRENT_TIMESTAMP WHERE alias = ?
-			`, lowered)
+				UPDATE grocery_aliases SET use_count = use_count + 1, last_used = CURRENT_TIMESTAMP
+				WHERE account_id = ? AND alias = ?
+			`, s.accountID, lowered)
 			for _, l := range cart.Lines {
 				if l.Product.ID == aliasID {
 					p := l.Product
@@ -218,13 +292,11 @@ func (s *Service) Add(ctx context.Context, text string, qty float64) (*AddResult
 			}
 			return &AddResult{Status: "added", Product: &product, Quantity: qty, CartTotal: cart.Total}, nil
 		}
-		// Stale alias — drop and fall through to search.
-		_, _ = s.db.ExecContext(ctx, `DELETE FROM grocery_aliases WHERE alias = ?`, lowered)
+		_, _ = s.db.ExecContext(ctx, `DELETE FROM grocery_aliases WHERE account_id = ? AND alias = ?`, s.accountID, lowered)
 	} else if err != sql.ErrNoRows {
 		return nil, fmt.Errorf("alias lookup: %w", err)
 	}
 
-	// 2) Algolia search
 	hits, err := s.client.Search(ctx, text, 5)
 	if err != nil {
 		return nil, err
@@ -233,7 +305,6 @@ func (s *Service) Add(ctx context.Context, text string, qty float64) (*AddResult
 		return &AddResult{Status: "not_found", AliasText: text, Message: "no products matched"}, nil
 	}
 
-	// 3) single unambiguous hit
 	if len(hits) == 1 && strings.Contains(strings.ToLower(hits[0].DisplayName), lowered) {
 		hit := hits[0]
 		avail, aerr := s.productAvailable(ctx, hit.ID)
@@ -253,11 +324,10 @@ func (s *Service) Add(ctx context.Context, text string, qty float64) (*AddResult
 		return &AddResult{Status: "added", Product: &hit, Quantity: qty, CartTotal: cart.Total}, nil
 	}
 
-	// 4) ambiguous → pending
 	optsJSON, _ := json.Marshal(hits)
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO grocery_pending (alias_text, options_json) VALUES (?, ?)
-	`, lowered, string(optsJSON))
+		INSERT INTO grocery_pending (account_id, alias_text, options_json) VALUES (?, ?, ?)
+	`, s.accountID, lowered, string(optsJSON))
 	if err != nil {
 		return nil, fmt.Errorf("save pending: %w", err)
 	}
@@ -301,8 +371,7 @@ func (s *Service) AddByID(ctx context.Context, productID string, qty float64) (*
 	return &AddResult{Status: "added", Product: &product, Quantity: qty, CartTotal: cart.Total}, nil
 }
 
-// Resolve completes a previously ambiguous Add by selecting one of the options.
-// Pass productID="" to skip without adding.
+// Resolve completes a previously ambiguous Add.
 func (s *Service) Resolve(ctx context.Context, pendingID int64, productID string) (*client.Product, *client.Cart, error) {
 	var (
 		aliasText  string
@@ -310,8 +379,9 @@ func (s *Service) Resolve(ctx context.Context, pendingID int64, productID string
 		resolvedAt sql.NullTime
 	)
 	err := s.db.QueryRowContext(ctx, `
-		SELECT alias_text, options_json, resolved_at FROM grocery_pending WHERE id = ?
-	`, pendingID).Scan(&aliasText, &optsJSON, &resolvedAt)
+		SELECT alias_text, options_json, resolved_at FROM grocery_pending
+		WHERE id = ? AND account_id = ?
+	`, pendingID, s.accountID).Scan(&aliasText, &optsJSON, &resolvedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil, fmt.Errorf("pending %d not found", pendingID)
 	}
@@ -326,7 +396,7 @@ func (s *Service) Resolve(ctx context.Context, pendingID int64, productID string
 		return nil, nil, fmt.Errorf("decode options: %w", err)
 	}
 	if productID == "" {
-		_, _ = s.db.ExecContext(ctx, `UPDATE grocery_pending SET resolved_at = CURRENT_TIMESTAMP WHERE id = ?`, pendingID)
+		_, _ = s.db.ExecContext(ctx, `UPDATE grocery_pending SET resolved_at = CURRENT_TIMESTAMP WHERE id = ? AND account_id = ?`, pendingID, s.accountID)
 		return nil, nil, nil
 	}
 	var chosen *client.Product
@@ -353,7 +423,7 @@ func (s *Service) Resolve(ctx context.Context, pendingID int64, productID string
 	if err := s.upsertAlias(ctx, aliasText, chosen.ID, chosen.DisplayName); err != nil {
 		return nil, nil, err
 	}
-	_, _ = s.db.ExecContext(ctx, `UPDATE grocery_pending SET resolved_at = CURRENT_TIMESTAMP WHERE id = ?`, pendingID)
+	_, _ = s.db.ExecContext(ctx, `UPDATE grocery_pending SET resolved_at = CURRENT_TIMESTAMP WHERE id = ? AND account_id = ?`, pendingID, s.accountID)
 	return chosen, cart, nil
 }
 
@@ -414,8 +484,9 @@ func (s *Service) Clear(ctx context.Context) error {
 func (s *Service) ListAliases(ctx context.Context) ([]Alias, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, alias, product_id, product_name, use_count
-		FROM grocery_aliases ORDER BY use_count DESC, last_used DESC
-	`)
+		FROM grocery_aliases WHERE account_id = ?
+		ORDER BY use_count DESC, last_used DESC
+	`, s.accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -433,7 +504,7 @@ func (s *Service) ListAliases(ctx context.Context) ([]Alias, error) {
 
 // DeleteAlias removes one alias by id.
 func (s *Service) DeleteAlias(ctx context.Context, id int64) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM grocery_aliases WHERE id = ?`, id)
+	res, err := s.db.ExecContext(ctx, `DELETE FROM grocery_aliases WHERE id = ? AND account_id = ?`, id, s.accountID)
 	if err != nil {
 		return err
 	}
@@ -491,13 +562,13 @@ func (s *Service) addLine(ctx context.Context, product client.Product, qty float
 
 func (s *Service) upsertAlias(ctx context.Context, alias, productID, productName string) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO grocery_aliases (alias, product_id, product_name) VALUES (?, ?, ?)
-		ON CONFLICT(alias) DO UPDATE SET
+		INSERT INTO grocery_aliases (account_id, alias, product_id, product_name) VALUES (?, ?, ?, ?)
+		ON CONFLICT(account_id, alias) DO UPDATE SET
 			product_id = excluded.product_id,
 			product_name = excluded.product_name,
 			use_count = grocery_aliases.use_count + 1,
 			last_used = CURRENT_TIMESTAMP
-	`, alias, productID, productName)
+	`, s.accountID, alias, productID, productName)
 	if err != nil {
 		return fmt.Errorf("upsert alias: %w", err)
 	}

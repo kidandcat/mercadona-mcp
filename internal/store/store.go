@@ -1,4 +1,4 @@
-// Package store opens the SQLite database used for session, aliases and pending choices.
+// Package store opens the SQLite database used for accounts, sessions, aliases and pending choices.
 package store
 
 import (
@@ -9,6 +9,9 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+// LocalAccountID is the single-tenant account used by stdio / env-credentials mode.
+const LocalAccountID = "local"
 
 // Open opens (and migrates) the SQLite database at path. Caller closes.
 func Open(path string) (*sql.DB, error) {
@@ -38,6 +41,22 @@ func Open(path string) (*sql.DB, error) {
 
 func migrate(db *sql.DB) error {
 	stmts := []string{
+		// Hosted multi-tenant accounts. Tokens are stored encrypted (AES-GCM).
+		`CREATE TABLE IF NOT EXISTS accounts (
+			id TEXT PRIMARY KEY,
+			api_token_hash TEXT NOT NULL UNIQUE,
+			email_hint TEXT,
+			postal_code TEXT,
+			warehouse TEXT,
+			access_token_enc TEXT NOT NULL,
+			refresh_token_enc TEXT,
+			customer_id TEXT NOT NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			last_used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_accounts_token ON accounts(api_token_hash)`,
+
+		// Legacy single-row session for stdio mode (account_id = 'local').
 		`CREATE TABLE IF NOT EXISTS mercadona_session (
 			id INTEGER PRIMARY KEY CHECK (id = 1),
 			access_token TEXT NOT NULL,
@@ -45,27 +64,37 @@ func migrate(db *sql.DB) error {
 			customer_id TEXT NOT NULL,
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
+
 		`CREATE TABLE IF NOT EXISTS grocery_aliases (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			alias TEXT NOT NULL UNIQUE,
+			account_id TEXT NOT NULL DEFAULT 'local',
+			alias TEXT NOT NULL,
 			product_id TEXT NOT NULL,
 			product_name TEXT NOT NULL,
 			use_count INTEGER NOT NULL DEFAULT 1,
 			last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(account_id, alias)
 		)`,
+		`CREATE INDEX IF NOT EXISTS idx_aliases_account ON grocery_aliases(account_id)`,
+
 		`CREATE TABLE IF NOT EXISTS grocery_pending (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			account_id TEXT NOT NULL DEFAULT 'local',
 			alias_text TEXT NOT NULL,
 			options_json TEXT NOT NULL,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			resolved_at TIMESTAMP
 		)`,
+		`CREATE INDEX IF NOT EXISTS idx_pending_account ON grocery_pending(account_id)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
 			return fmt.Errorf("store: migrate: %w", err)
 		}
 	}
+	// Best-effort: add account_id to old DBs that predate multi-tenant.
+	_, _ = db.Exec(`ALTER TABLE grocery_aliases ADD COLUMN account_id TEXT NOT NULL DEFAULT 'local'`)
+	_, _ = db.Exec(`ALTER TABLE grocery_pending ADD COLUMN account_id TEXT NOT NULL DEFAULT 'local'`)
 	return nil
 }
