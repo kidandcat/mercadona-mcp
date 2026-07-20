@@ -18,15 +18,21 @@ Add that URL in Claude, Grok, Cursor, etc. On first use the client opens a brows
 
 | Tool | Description |
 |------|-------------|
-| `mercadona_search` | Search the catalog |
-| `mercadona_add` | Add by free-text name |
-| `mercadona_add_by_id` | Add a known product id |
-| `mercadona_resolve` | Resolve an ambiguous add |
+| `mercadona_search` | Search the catalog (marks `preferred` products) |
+| `mercadona_add` | Add by free-text name (auto-picks preferred when unique) |
+| `mercadona_add_by_id` | Add a known product id (optional `text` alias; always learns preferred) |
+| `mercadona_resolve` | Resolve an ambiguous add (learns preferred + alias) |
 | `mercadona_remove` | Remove a cart line |
 | `mercadona_list` | List cart + total |
 | `mercadona_clear` | Empty the cart |
-| `mercadona_aliases_list` | Learned aliases |
+| `mercadona_preferred_list` | Products chosen before |
+| `mercadona_preferred_delete` | Drop a preferred product |
+| `mercadona_aliases_list` | Free-text → product aliases |
 | `mercadona_alias_delete` | Delete an alias |
+
+### Preferred products
+
+When the user picks a product (`mercadona_resolve` or `mercadona_add_by_id`), it is saved as **preferred**. Next time `mercadona_add` would ask among several search hits, if **exactly one** of those hits is preferred, it is added automatically. Exact free-text aliases still win first (same query string → same product, no search).
 
 ## Self-host
 

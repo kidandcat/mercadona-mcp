@@ -65,6 +65,9 @@ func migrate(db *sql.DB) error {
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 
+		// Fresh installs get multi-tenant columns. Older single-tenant DBs keep
+		// the original table shape (CREATE IF NOT EXISTS is a no-op) and are
+		// patched below with ALTER + indexes that need account_id.
 		`CREATE TABLE IF NOT EXISTS grocery_aliases (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			account_id TEXT NOT NULL DEFAULT 'local',
@@ -76,7 +79,6 @@ func migrate(db *sql.DB) error {
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			UNIQUE(account_id, alias)
 		)`,
-		`CREATE INDEX IF NOT EXISTS idx_aliases_account ON grocery_aliases(account_id)`,
 
 		`CREATE TABLE IF NOT EXISTS grocery_pending (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -86,7 +88,20 @@ func migrate(db *sql.DB) error {
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			resolved_at TIMESTAMP
 		)`,
-		`CREATE INDEX IF NOT EXISTS idx_pending_account ON grocery_pending(account_id)`,
+
+		// Products the user has chosen before. When a search returns several
+		// options and exactly one is preferred, the server auto-picks it so the
+		// agent does not re-ask.
+		`CREATE TABLE IF NOT EXISTS grocery_preferred (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			account_id TEXT NOT NULL DEFAULT 'local',
+			product_id TEXT NOT NULL,
+			product_name TEXT NOT NULL,
+			use_count INTEGER NOT NULL DEFAULT 1,
+			last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(account_id, product_id)
+		)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
@@ -94,7 +109,22 @@ func migrate(db *sql.DB) error {
 		}
 	}
 	// Best-effort: add account_id to old DBs that predate multi-tenant.
+	// Must run before indexes that reference account_id.
 	_, _ = db.Exec(`ALTER TABLE grocery_aliases ADD COLUMN account_id TEXT NOT NULL DEFAULT 'local'`)
 	_, _ = db.Exec(`ALTER TABLE grocery_pending ADD COLUMN account_id TEXT NOT NULL DEFAULT 'local'`)
+
+	// Indexes + unique constraints that older schemas may lack.
+	// ON CONFLICT(account_id, alias) needs a matching unique index.
+	post := []string{
+		`CREATE INDEX IF NOT EXISTS idx_aliases_account ON grocery_aliases(account_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_aliases_account_alias ON grocery_aliases(account_id, alias)`,
+		`CREATE INDEX IF NOT EXISTS idx_pending_account ON grocery_pending(account_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_preferred_account ON grocery_preferred(account_id)`,
+	}
+	for _, s := range post {
+		if _, err := db.Exec(s); err != nil {
+			return fmt.Errorf("store: migrate: %w", err)
+		}
+	}
 	return nil
 }

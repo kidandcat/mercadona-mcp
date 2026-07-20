@@ -16,8 +16,10 @@ func Register(s *mcp.Server, svc *service.Service) {
 	s.Register(mcp.Tool{
 		Name: "mercadona_search",
 		Description: "Search Mercadona products by free text (Algolia catalog). " +
-			"Returns product id, name, brand, packaging and price. No auth required. " +
-			"Use mercadona_add or mercadona_add_by_id to put items in the cart.",
+			"Returns product id, name, brand, packaging, price, and preferred=true when the " +
+			"user has chosen that product before. Preferred hits are listed first. " +
+			"Prefer mercadona_add for free-text adds (it auto-picks preferred products). " +
+			"If you use mercadona_add_by_id after the user picks one, pass text= the original query so it is remembered.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -42,9 +44,11 @@ func Register(s *mcp.Server, svc *service.Service) {
 	s.Register(mcp.Tool{
 		Name: "mercadona_add",
 		Description: "Add an item to the Mercadona online cart by free-text name. " +
+			"Remembers the user's choice: next time the same text (or a search that includes their " +
+			"preferred product as the only preferred hit) is added without asking again. " +
 			"If the query is ambiguous, returns status=\"asked\" with options and a pending_id — " +
 			"then call mercadona_resolve with the chosen product_id. " +
-			"status=\"added\" means it was added directly (alias hit or single clear match). " +
+			"status=\"added\" means it was added directly (alias hit, preferred auto-pick, or single clear match). " +
 			"status=\"not_found\" / \"unavailable\" mean nothing was added.",
 		InputSchema: map[string]any{
 			"type": "object",
@@ -67,19 +71,26 @@ func Register(s *mcp.Server, svc *service.Service) {
 	s.Register(mcp.Tool{
 		Name: "mercadona_add_by_id",
 		Description: "Add a known Mercadona product_id to the cart (skips search). " +
-			"Use after mercadona_search when you already know the id.",
+			"Always saves the product as preferred so future mercadona_add / mercadona_search " +
+			"can auto-pick it. Pass text= the free-text the user used (e.g. \"leche\") so that " +
+			"exact query becomes an alias and next mercadona_add skips the question.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"product_id": map[string]any{"type": "string", "description": "Mercadona product id, e.g. \"10379\""},
 				"quantity":   map[string]any{"type": "number", "description": "Quantity (default 1)"},
+				"text": map[string]any{
+					"type":        "string",
+					"description": "Optional free-text query to remember as alias, e.g. the search terms the user said",
+				},
 			},
 			"required": []string{"product_id"},
 		},
 	}, func(ctx context.Context, args map[string]any) (string, error) {
 		id, _ := args["product_id"].(string)
 		qty := numArg(args, "quantity", 1)
-		res, err := svc.AddByID(ctx, id, qty)
+		text, _ := args["text"].(string)
+		res, err := svc.AddByID(ctx, id, qty, text)
 		if err != nil {
 			return "", err
 		}
@@ -89,6 +100,7 @@ func Register(s *mcp.Server, svc *service.Service) {
 	s.Register(mcp.Tool{
 		Name: "mercadona_resolve",
 		Description: "Resolve a pending ambiguous mercadona_add by selecting one option. " +
+			"Saves the choice as preferred + free-text alias so next time the agent is not asked. " +
 			"Pass product_id=\"\" to skip without adding anything.",
 		InputSchema: map[string]any{
 			"type": "object",
@@ -115,6 +127,8 @@ func Register(s *mcp.Server, svc *service.Service) {
 			"status":     "added",
 			"product":    product,
 			"cart_total": cart.Total,
+			"preferred":  true,
+			"message":    "saved as preferred for next time",
 		})
 	})
 
@@ -161,8 +175,8 @@ func Register(s *mcp.Server, svc *service.Service) {
 	})
 
 	s.Register(mcp.Tool{
-		Name:        "mercadona_aliases_list",
-		Description: "List saved aliases (free-text → Mercadona product_id) learned from past adds.",
+		Name: "mercadona_aliases_list",
+		Description: "List saved free-text aliases (exact query → product_id) learned from past adds/resolves.",
 		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
 	}, func(ctx context.Context, args map[string]any) (string, error) {
 		aliases, err := svc.ListAliases(ctx)
@@ -174,7 +188,7 @@ func Register(s *mcp.Server, svc *service.Service) {
 
 	s.Register(mcp.Tool{
 		Name:        "mercadona_alias_delete",
-		Description: "Delete a saved alias by id (from mercadona_aliases_list).",
+		Description: "Delete a saved free-text alias by id (from mercadona_aliases_list).",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -188,6 +202,40 @@ func Register(s *mcp.Server, svc *service.Service) {
 			return "", fmt.Errorf("id required")
 		}
 		if err := svc.DeleteAlias(ctx, id); err != nil {
+			return "", err
+		}
+		return "deleted", nil
+	})
+
+	s.Register(mcp.Tool{
+		Name: "mercadona_preferred_list",
+		Description: "List preferred products (product_ids the user has chosen before). " +
+			"When mercadona_add search results contain exactly one preferred product, it is auto-added.",
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
+	}, func(ctx context.Context, args map[string]any) (string, error) {
+		prefs, err := svc.ListPreferred(ctx)
+		if err != nil {
+			return "", err
+		}
+		return marshal(prefs)
+	})
+
+	s.Register(mcp.Tool{
+		Name:        "mercadona_preferred_delete",
+		Description: "Remove a product from the preferred list by id (from mercadona_preferred_list).",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"id": map[string]any{"type": "integer", "description": "Row id from mercadona_preferred_list"},
+			},
+			"required": []string{"id"},
+		},
+	}, func(ctx context.Context, args map[string]any) (string, error) {
+		id := int64(numArg(args, "id", 0))
+		if id <= 0 {
+			return "", fmt.Errorf("id required")
+		}
+		if err := svc.DeletePreferred(ctx, id); err != nil {
 			return "", err
 		}
 		return "deleted", nil

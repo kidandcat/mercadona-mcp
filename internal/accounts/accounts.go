@@ -129,6 +129,8 @@ func (s *Store) LookupByToken(ctx context.Context, apiToken string) (string, err
 // Delete removes an account (and cascade aliases manually).
 func (s *Store) Delete(ctx context.Context, accountID string) error {
 	_, _ = s.db.ExecContext(ctx, `DELETE FROM grocery_aliases WHERE account_id = ?`, accountID)
+	_, _ = s.db.ExecContext(ctx, `DELETE FROM grocery_preferred WHERE account_id = ?`, accountID)
+	_, _ = s.db.ExecContext(ctx, `DELETE FROM grocery_pending WHERE account_id = ?`, accountID)
 	_, _ = s.db.ExecContext(ctx, `DELETE FROM grocery_pending WHERE account_id = ?`, accountID)
 	res, err := s.db.ExecContext(ctx, `DELETE FROM accounts WHERE id = ?`, accountID)
 	if err != nil {

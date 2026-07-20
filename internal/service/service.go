@@ -1,5 +1,6 @@
 // Package service is the stateful façade used by the MCP tools: session
-// persistence, ambiguity resolution, alias bookkeeping, and cart mutations.
+// persistence, ambiguity resolution, preferred/alias bookkeeping, and cart
+// mutations.
 //
 // Each Service instance is scoped to one accountID ("local" for stdio env mode,
 // or a hosted connection id).
@@ -66,15 +67,31 @@ type AddResult struct {
 	Options   []client.Product `json:"options,omitempty"`
 	AliasText string           `json:"alias_text,omitempty"`
 	Message   string           `json:"message,omitempty"`
+	// Preferred is true when the product was auto-picked from the preferred list.
+	Preferred bool `json:"preferred,omitempty"`
 }
 
-// Alias is a saved free-text → product mapping.
+// Alias is a saved free-text → product mapping (exact query match).
 type Alias struct {
 	ID          int64  `json:"id"`
 	Alias       string `json:"alias"`
 	ProductID   string `json:"product_id"`
 	ProductName string `json:"product_name"`
 	UseCount    int    `json:"use_count"`
+}
+
+// Preferred is a product the user has chosen before (any free-text query).
+type Preferred struct {
+	ID          int64  `json:"id"`
+	ProductID   string `json:"product_id"`
+	ProductName string `json:"product_name"`
+	UseCount    int    `json:"use_count"`
+}
+
+// SearchHit is a catalog product annotated with whether it is preferred for this account.
+type SearchHit struct {
+	client.Product
+	Preferred bool `json:"preferred"`
 }
 
 func (s *Service) getSession(ctx context.Context, forceRefresh bool) (*client.Session, error) {
@@ -235,7 +252,8 @@ func withRetry[T any](s *Service, ctx context.Context, op func(*client.Session) 
 }
 
 // Search products by free text (no auth required for the index itself).
-func (s *Service) Search(ctx context.Context, query string, limit int) ([]client.Product, error) {
+// Hits that the user has preferred before are flagged preferred=true and sorted first.
+func (s *Service) Search(ctx context.Context, query string, limit int) ([]SearchHit, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return nil, fmt.Errorf("query required")
@@ -243,7 +261,28 @@ func (s *Service) Search(ctx context.Context, query string, limit int) ([]client
 	if limit <= 0 {
 		limit = 5
 	}
-	return s.client.Search(ctx, query, limit)
+	hits, err := s.client.Search(ctx, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	prefSet, err := s.preferredIDSet(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SearchHit, len(hits))
+	for i, h := range hits {
+		out[i] = SearchHit{Product: h, Preferred: prefSet[h.ID]}
+	}
+	// Preferred first so agents see the user's usual pick without scanning.
+	for i := 0; i < len(out); i++ {
+		if !out[i].Preferred {
+			continue
+		}
+		for j := i; j > 0 && !out[j-1].Preferred; j-- {
+			out[j], out[j-1] = out[j-1], out[j]
+		}
+	}
+	return out, nil
 }
 
 // GetCart returns the current cart.
@@ -254,6 +293,12 @@ func (s *Service) GetCart(ctx context.Context) (*client.Cart, error) {
 }
 
 // Add adds text (qty) to the cart. See AddResult.Status for outcomes.
+//
+// Preference order:
+//  1. Exact free-text alias for this query
+//  2. Search hits: auto-add when a single clear match, or when exactly one hit
+//     is on the preferred list (product chosen in a past session)
+//  3. Otherwise status=asked with options (agent must call mercadona_resolve)
 func (s *Service) Add(ctx context.Context, text string, qty float64) (*AddResult, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -284,13 +329,14 @@ func (s *Service) Add(ctx context.Context, text string, qty float64) (*AddResult
 				UPDATE grocery_aliases SET use_count = use_count + 1, last_used = CURRENT_TIMESTAMP
 				WHERE account_id = ? AND alias = ?
 			`, s.accountID, lowered)
+			_ = s.upsertPreferred(ctx, aliasID, aliasName)
 			for _, l := range cart.Lines {
 				if l.Product.ID == aliasID {
 					p := l.Product
-					return &AddResult{Status: "added", Product: &p, Quantity: l.Quantity, CartTotal: cart.Total}, nil
+					return &AddResult{Status: "added", Product: &p, Quantity: l.Quantity, CartTotal: cart.Total, Preferred: true}, nil
 				}
 			}
-			return &AddResult{Status: "added", Product: &product, Quantity: qty, CartTotal: cart.Total}, nil
+			return &AddResult{Status: "added", Product: &product, Quantity: qty, CartTotal: cart.Total, Preferred: true}, nil
 		}
 		_, _ = s.db.ExecContext(ctx, `DELETE FROM grocery_aliases WHERE account_id = ? AND alias = ?`, s.accountID, lowered)
 	} else if err != sql.ErrNoRows {
@@ -305,23 +351,25 @@ func (s *Service) Add(ctx context.Context, text string, qty float64) (*AddResult
 		return &AddResult{Status: "not_found", AliasText: text, Message: "no products matched"}, nil
 	}
 
+	// Single clear match: name contains the query.
 	if len(hits) == 1 && strings.Contains(strings.ToLower(hits[0].DisplayName), lowered) {
-		hit := hits[0]
-		avail, aerr := s.productAvailable(ctx, hit.ID)
-		if aerr != nil {
-			return nil, aerr
-		}
-		if !avail {
-			return &AddResult{Status: "unavailable", Product: &hit, AliasText: text, Message: "product not available in your zone"}, nil
-		}
-		cart, err := s.addLine(ctx, hit, qty)
+		return s.addChosen(ctx, hits[0], qty, lowered, false)
+	}
+
+	// Exactly one preferred product among the hits → auto-pick (no re-ask).
+	prefHits, err := s.filterPreferred(ctx, hits)
+	if err != nil {
+		return nil, err
+	}
+	if len(prefHits) == 1 {
+		res, err := s.addChosen(ctx, prefHits[0], qty, lowered, true)
 		if err != nil {
 			return nil, err
 		}
-		if err := s.upsertAlias(ctx, lowered, hit.ID, hit.DisplayName); err != nil {
-			return nil, err
+		if res.Status == "added" {
+			res.Message = "auto-selected preferred product"
 		}
-		return &AddResult{Status: "added", Product: &hit, Quantity: qty, CartTotal: cart.Total}, nil
+		return res, nil
 	}
 
 	optsJSON, _ := json.Marshal(hits)
@@ -332,17 +380,53 @@ func (s *Service) Add(ctx context.Context, text string, qty float64) (*AddResult
 		return nil, fmt.Errorf("save pending: %w", err)
 	}
 	pendingID, _ := res.LastInsertId()
+	msg := "ambiguous — pick a product_id and call mercadona_resolve"
+	if len(prefHits) > 1 {
+		msg = "ambiguous (several preferred) — pick a product_id and call mercadona_resolve"
+	}
 	return &AddResult{
 		Status:    "asked",
 		PendingID: pendingID,
 		Options:   hits,
 		AliasText: lowered,
-		Message:   "ambiguous — pick a product_id and call mercadona_resolve",
+		Message:   msg,
 	}, nil
 }
 
-// AddByID adds a known product id to the cart (skips search/alias).
-func (s *Service) AddByID(ctx context.Context, productID string, qty float64) (*AddResult, error) {
+// addChosen adds a product, learns alias + preferred, and returns the cart result.
+func (s *Service) addChosen(ctx context.Context, hit client.Product, qty float64, aliasText string, fromPreferred bool) (*AddResult, error) {
+	avail, aerr := s.productAvailable(ctx, hit.ID)
+	if aerr != nil {
+		return nil, aerr
+	}
+	if !avail {
+		return &AddResult{Status: "unavailable", Product: &hit, AliasText: aliasText, Message: "product not available in your zone"}, nil
+	}
+	cart, err := s.addLine(ctx, hit, qty)
+	if err != nil {
+		return nil, err
+	}
+	if aliasText != "" {
+		if err := s.upsertAlias(ctx, aliasText, hit.ID, hit.DisplayName); err != nil {
+			return nil, err
+		}
+	}
+	if err := s.upsertPreferred(ctx, hit.ID, hit.DisplayName); err != nil {
+		return nil, err
+	}
+	for _, l := range cart.Lines {
+		if l.Product.ID == hit.ID {
+			p := l.Product
+			return &AddResult{Status: "added", Product: &p, Quantity: l.Quantity, CartTotal: cart.Total, Preferred: fromPreferred}, nil
+		}
+	}
+	return &AddResult{Status: "added", Product: &hit, Quantity: qty, CartTotal: cart.Total, Preferred: fromPreferred}, nil
+}
+
+// AddByID adds a known product id to the cart (skips search).
+// If text is non-empty, it is saved as an alias for future mercadona_add calls.
+// The product is always added to the preferred list after a successful add.
+func (s *Service) AddByID(ctx context.Context, productID string, qty float64, text string) (*AddResult, error) {
 	productID = strings.TrimSpace(productID)
 	if productID == "" {
 		return nil, fmt.Errorf("product_id required")
@@ -362,16 +446,34 @@ func (s *Service) AddByID(ctx context.Context, productID string, qty float64) (*
 	if err != nil {
 		return nil, err
 	}
+	var added *client.Product
 	for _, l := range cart.Lines {
 		if l.Product.ID == productID {
 			p := l.Product
-			return &AddResult{Status: "added", Product: &p, Quantity: l.Quantity, CartTotal: cart.Total}, nil
+			added = &p
+			break
 		}
 	}
-	return &AddResult{Status: "added", Product: &product, Quantity: qty, CartTotal: cart.Total}, nil
+	if added == nil {
+		added = &product
+	}
+	name := added.DisplayName
+	if name == "" {
+		name = productID
+	}
+	if err := s.upsertPreferred(ctx, productID, name); err != nil {
+		return nil, err
+	}
+	if t := strings.ToLower(strings.TrimSpace(text)); t != "" {
+		if err := s.upsertAlias(ctx, t, productID, name); err != nil {
+			return nil, err
+		}
+	}
+	return &AddResult{Status: "added", Product: added, Quantity: qty, CartTotal: cart.Total}, nil
 }
 
 // Resolve completes a previously ambiguous Add.
+// Choosing a product learns both the free-text alias and preferred product.
 func (s *Service) Resolve(ctx context.Context, pendingID int64, productID string) (*client.Product, *client.Cart, error) {
 	var (
 		aliasText  string
@@ -421,6 +523,9 @@ func (s *Service) Resolve(ctx context.Context, pendingID int64, productID string
 		return nil, nil, err
 	}
 	if err := s.upsertAlias(ctx, aliasText, chosen.ID, chosen.DisplayName); err != nil {
+		return nil, nil, err
+	}
+	if err := s.upsertPreferred(ctx, chosen.ID, chosen.DisplayName); err != nil {
 		return nil, nil, err
 	}
 	_, _ = s.db.ExecContext(ctx, `UPDATE grocery_pending SET resolved_at = CURRENT_TIMESTAMP WHERE id = ? AND account_id = ?`, pendingID, s.accountID)
@@ -480,7 +585,7 @@ func (s *Service) Clear(ctx context.Context) error {
 	return err
 }
 
-// ListAliases returns saved aliases ordered by use.
+// ListAliases returns saved free-text aliases ordered by use.
 func (s *Service) ListAliases(ctx context.Context) ([]Alias, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, alias, product_id, product_name, use_count
@@ -511,6 +616,41 @@ func (s *Service) DeleteAlias(ctx context.Context, id int64) error {
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return fmt.Errorf("alias %d not found", id)
+	}
+	return nil
+}
+
+// ListPreferred returns products the user has chosen before, most-used first.
+func (s *Service) ListPreferred(ctx context.Context) ([]Preferred, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, product_id, product_name, use_count
+		FROM grocery_preferred WHERE account_id = ?
+		ORDER BY use_count DESC, last_used DESC
+	`, s.accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Preferred
+	for rows.Next() {
+		var p Preferred
+		if err := rows.Scan(&p.ID, &p.ProductID, &p.ProductName, &p.UseCount); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// DeletePreferred removes one preferred product by id (row id from ListPreferred).
+func (s *Service) DeletePreferred(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM grocery_preferred WHERE id = ? AND account_id = ?`, id, s.accountID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("preferred %d not found", id)
 	}
 	return nil
 }
@@ -561,6 +701,10 @@ func (s *Service) addLine(ctx context.Context, product client.Product, qty float
 }
 
 func (s *Service) upsertAlias(ctx context.Context, alias, productID, productName string) error {
+	alias = strings.ToLower(strings.TrimSpace(alias))
+	if alias == "" || productID == "" {
+		return nil
+	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO grocery_aliases (account_id, alias, product_id, product_name) VALUES (?, ?, ?, ?)
 		ON CONFLICT(account_id, alias) DO UPDATE SET
@@ -573,4 +717,61 @@ func (s *Service) upsertAlias(ctx context.Context, alias, productID, productName
 		return fmt.Errorf("upsert alias: %w", err)
 	}
 	return nil
+}
+
+func (s *Service) upsertPreferred(ctx context.Context, productID, productName string) error {
+	productID = strings.TrimSpace(productID)
+	if productID == "" {
+		return nil
+	}
+	if productName == "" {
+		productName = productID
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO grocery_preferred (account_id, product_id, product_name) VALUES (?, ?, ?)
+		ON CONFLICT(account_id, product_id) DO UPDATE SET
+			product_name = excluded.product_name,
+			use_count = grocery_preferred.use_count + 1,
+			last_used = CURRENT_TIMESTAMP
+	`, s.accountID, productID, productName)
+	if err != nil {
+		return fmt.Errorf("upsert preferred: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) preferredIDSet(ctx context.Context) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT product_id FROM grocery_preferred WHERE account_id = ?
+	`, s.accountID)
+	if err != nil {
+		return nil, fmt.Errorf("preferred list: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]bool)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
+func (s *Service) filterPreferred(ctx context.Context, hits []client.Product) ([]client.Product, error) {
+	prefSet, err := s.preferredIDSet(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(prefSet) == 0 {
+		return nil, nil
+	}
+	var out []client.Product
+	for _, h := range hits {
+		if prefSet[h.ID] {
+			out = append(out, h)
+		}
+	}
+	return out, nil
 }
