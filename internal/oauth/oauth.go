@@ -499,28 +499,28 @@ var authorizeTmpl = template.Must(template.New("auth").Parse(`<!DOCTYPE html>
 <title>Conectar Mercadona — MCP</title>
 <style>
   :root {
-    --bg:#0f1410; --card:#1a221c; --border:#2d3b30; --text:#eef4ef;
-    --muted:#9aab9e; --accent:#5cbe6e; --accent-dim:#3a8a4a; --danger:#e07070;
+    --bg:#f4f7f4; --card:#fff; --border:#d5e0d6; --text:#1a241c;
+    --muted:#5c6b5e; --accent:#2d8a3e; --accent-hover:#247033;
   }
   *{box-sizing:border-box}
   body{margin:0;min-height:100vh;font-family:system-ui,-apple-system,sans-serif;
-    background:radial-gradient(900px 500px at 20% -10%,#1e3a24,transparent 55%),var(--bg);
+    background:radial-gradient(900px 500px at 20% -10%,#dcefe0,transparent 55%),var(--bg);
     color:var(--text);display:flex;align-items:center;justify-content:center;padding:1.25rem}
   .card{background:var(--card);border:1px solid var(--border);border-radius:14px;
-    padding:1.75rem;max-width:420px;width:100%}
+    padding:1.75rem;max-width:420px;width:100%;
+    box-shadow:0 1px 2px rgba(26,36,28,.04),0 8px 24px rgba(26,36,28,.06)}
   h1{margin:0 0 .4rem;font-size:1.35rem}
   p{color:var(--muted);font-size:.92rem;margin:0 0 1.2rem;line-height:1.45}
   label{display:block;font-size:.8rem;color:var(--muted);margin:.85rem 0 .3rem}
   input{width:100%;padding:.7rem .85rem;border-radius:10px;border:1px solid var(--border);
-    background:#0d120e;color:var(--text);font-size:1rem}
-  input:focus{outline:none;border-color:var(--accent-dim);box-shadow:0 0 0 3px rgba(92,190,110,.15)}
+    background:#fff;color:var(--text);font-size:1rem}
+  input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(45,138,62,.15)}
   button{width:100%;margin-top:1.2rem;padding:.85rem;border:none;border-radius:10px;
-    background:linear-gradient(180deg,var(--accent),var(--accent-dim));color:#061008;
-    font-weight:700;font-size:1rem;cursor:pointer}
-  button:hover{filter:brightness(1.05)}
-  .err{background:rgba(224,112,112,.12);border:1px solid rgba(224,112,112,.35);
-    color:#ffc9c9;border-radius:10px;padding:.7rem .85rem;font-size:.88rem;margin-bottom:1rem}
-  .meta{font-size:.7rem;color:#5a6a5e;margin-top:1rem;word-break:break-all}
+    background:var(--accent);color:#fff;font-weight:700;font-size:1rem;cursor:pointer}
+  button:hover{background:var(--accent-hover)}
+  .err{background:#fef2f2;border:1px solid #f5c2c2;
+    color:#9b1c1c;border-radius:10px;padding:.7rem .85rem;font-size:.88rem;margin-bottom:1rem}
+  .meta{font-size:.7rem;color:#8a9a8c;margin-top:1rem;word-break:break-all}
   .hint{font-size:.78rem;color:var(--muted);margin-top:.75rem}
 </style>
 </head>

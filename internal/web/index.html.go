@@ -10,13 +10,13 @@ const indexHTML = `<!DOCTYPE html>
 <meta name="description" content="MCP de Mercadona: añade la URL en tu cliente de IA y conecta con OAuth."/>
 <style>
   :root {
-    --bg: #0f1410;
-    --card: #1a221c;
-    --border: #2d3b30;
-    --text: #eef4ef;
-    --muted: #9aab9e;
-    --accent: #5cbe6e;
-    --accent-dim: #3a8a4a;
+    --bg: #f4f7f4;
+    --card: #ffffff;
+    --border: #d5e0d6;
+    --text: #1a241c;
+    --muted: #5c6b5e;
+    --accent: #2d8a3e;
+    --accent-hover: #247033;
     --font: "Segoe UI", system-ui, -apple-system, sans-serif;
   }
   * { box-sizing: border-box; }
@@ -24,8 +24,8 @@ const indexHTML = `<!DOCTYPE html>
     margin: 0; min-height: 100vh;
     font-family: var(--font);
     background:
-      radial-gradient(1200px 600px at 10% -10%, #1e3a24 0%, transparent 55%),
-      radial-gradient(900px 500px at 100% 0%, #1a2a3a 0%, transparent 50%),
+      radial-gradient(1000px 500px at 15% -5%, #dcefe0 0%, transparent 55%),
+      radial-gradient(800px 400px at 100% 0%, #e8eef5 0%, transparent 50%),
       var(--bg);
     color: var(--text);
     line-height: 1.5;
@@ -38,8 +38,9 @@ const indexHTML = `<!DOCTYPE html>
   .badge {
     display: inline-block; font-size: .75rem; letter-spacing: .04em;
     text-transform: uppercase; color: var(--accent);
-    border: 1px solid var(--accent-dim); border-radius: 999px;
-    padding: .2rem .7rem; margin-bottom: 1rem;
+    border: 1px solid #b5d9bc; border-radius: 999px;
+    background: #eef8f0;
+    padding: .25rem .75rem; margin-bottom: 1rem;
   }
   h1 { font-size: clamp(1.5rem, 4vw, 2rem); margin: 0 0 .6rem; font-weight: 700; letter-spacing: -.02em; }
   .lead { color: var(--muted); font-size: 1.02rem; margin: 0 0 1.75rem; }
@@ -52,19 +53,21 @@ const indexHTML = `<!DOCTYPE html>
     border-radius: 14px;
     padding: 1.1rem 1.25rem;
     margin-bottom: 1rem;
+    box-shadow: 0 1px 2px rgba(26, 36, 28, .04), 0 8px 24px rgba(26, 36, 28, .06);
   }
   button {
-    background: linear-gradient(180deg, var(--accent), var(--accent-dim));
-    color: #061008;
+    background: var(--accent);
+    color: #fff;
     border: none;
     border-radius: 10px;
     padding: .7rem 1.25rem;
     font-weight: 700;
     font-size: .95rem;
     cursor: pointer;
+    box-shadow: 0 1px 2px rgba(45, 138, 62, .25);
   }
-  button:hover { filter: brightness(1.06); }
-  button.copied { opacity: .85; }
+  button:hover { background: var(--accent-hover); }
+  button.copied { opacity: .9; }
   .hint { color: var(--muted); font-size: .85rem; margin-top: 1.5rem; }
   footer { margin-top: 2.5rem; color: var(--muted); font-size: .78rem; }
   a { color: var(--accent); }
