@@ -36,6 +36,7 @@ import (
 	"github.com/kidandcat/mercadona-mcp/internal/accounts"
 	"github.com/kidandcat/mercadona-mcp/internal/cryptox"
 	"github.com/kidandcat/mercadona-mcp/internal/mcp"
+	"github.com/kidandcat/mercadona-mcp/internal/oauth"
 	"github.com/kidandcat/mercadona-mcp/internal/service"
 	"github.com/kidandcat/mercadona-mcp/internal/store"
 	"github.com/kidandcat/mercadona-mcp/internal/tools"
@@ -100,7 +101,11 @@ func runServe() error {
 	defer db.Close()
 
 	acc := accounts.New(db, box, base)
-	webSrv := web.New(db, acc, base)
+	oauthSvc, err := oauth.New(db, base, acc)
+	if err != nil {
+		return fmt.Errorf("oauth: %w", err)
+	}
+	webSrv := web.New(db, acc, oauthSvc, base)
 
 	addr := os.Getenv("HTTP_ADDR")
 	if addr == "" {

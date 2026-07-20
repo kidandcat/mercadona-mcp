@@ -111,18 +111,43 @@ const indexHTML = `<!DOCTYPE html>
     <div class="badge">no oficial · open source</div>
     <h1>Tu carrito de Mercadona, controlado por IA</h1>
     <p class="lead">
-      Conecta tu cuenta de Mercadona en un minuto. Te damos un enlace MCP para
-      pegar en Claude, Grok, Cursor o ChatGPT. Di “añade leche y huevos” y se
-      meten en tu carrito real de tienda.mercadona.es.
+      Solo pega la URL del MCP en Claude, Grok o Cursor. Al conectar, se abre el
+      navegador y pides email, contraseña y código postal de Mercadona. Di
+      “añade leche y huevos” y van al carrito real de tienda.mercadona.es.
     </p>
   </header>
 
+  <section class="card">
+    <h2 style="margin-top:0">1. Añade el MCP (OAuth automático)</h2>
+    <p class="hint" style="margin-top:0">No hace falta copiar tokens. El cliente abre el login solo.</p>
+    <div class="token-box" id="mcp-only-url">https://mercadona.cc/mcp</div>
+    <div class="copy-row">
+      <button class="ghost" type="button" data-copy="mcp-only-url">Copiar URL</button>
+    </div>
+
+    <h3>Claude / Cursor</h3>
+    <pre id="claude-oauth">{
+  "mcpServers": {
+    "mercadona": {
+      "url": "https://mercadona.cc/mcp"
+    }
+  }
+}</pre>
+    <button class="ghost" type="button" data-copy="claude-oauth">Copiar config Claude</button>
+
+    <h3>Grok Build</h3>
+    <pre id="grok-oauth">[mcp_servers.mercadona]
+url = "https://mercadona.cc/mcp"
+enabled = true</pre>
+    <button class="ghost" type="button" data-copy="grok-oauth">Copiar config Grok</button>
+    <p class="hint">Al usarlo por primera vez se abre el navegador → email + pass + CP de Mercadona → listo.</p>
+  </section>
+
   <section class="card" id="form-card">
-    <h2 style="margin-top:0">Conectar cuenta</h2>
+    <h2 style="margin-top:0">2. Alternativa manual (token)</h2>
     <p class="hint" style="margin-top:0">
-      Usamos las mismas credenciales que la web de Mercadona. La contraseña
-      <strong>no se guarda</strong>: solo un token de sesión cifrado y un API key
-      para el MCP.
+      Si tu cliente no soporta OAuth en MCP remoto, genera un token aquí.
+      La contraseña <strong>no se guarda</strong>: solo sesión cifrada + API key.
     </p>
     <form id="form">
       <label for="email">Email de Mercadona</label>

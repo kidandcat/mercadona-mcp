@@ -15,6 +15,7 @@ import (
 	"github.com/kidandcat/mercadona-mcp/internal/accounts"
 	"github.com/kidandcat/mercadona-mcp/internal/client"
 	"github.com/kidandcat/mercadona-mcp/internal/mcp"
+	"github.com/kidandcat/mercadona-mcp/internal/oauth"
 	"github.com/kidandcat/mercadona-mcp/internal/service"
 	"github.com/kidandcat/mercadona-mcp/internal/tools"
 )
@@ -23,6 +24,7 @@ import (
 type Server struct {
 	db       *sql.DB
 	accounts *accounts.Store
+	oauth    *oauth.Service
 	baseURL  string
 
 	// Simple IP rate limit for /api/connect.
@@ -30,11 +32,12 @@ type Server struct {
 	connects map[string][]time.Time
 }
 
-// New builds the web+MCP server.
-func New(db *sql.DB, acc *accounts.Store, baseURL string) *Server {
+// New builds the web+MCP server. oauthSvc may be nil only in tests.
+func New(db *sql.DB, acc *accounts.Store, oauthSvc *oauth.Service, baseURL string) *Server {
 	return &Server{
 		db:       db,
 		accounts: acc,
+		oauth:    oauthSvc,
 		baseURL:  strings.TrimRight(baseURL, "/"),
 		connects: make(map[string][]time.Time),
 	}
@@ -43,6 +46,9 @@ func New(db *sql.DB, acc *accounts.Store, baseURL string) *Server {
 // Handler returns the root HTTP handler.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	if s.oauth != nil {
+		s.oauth.Mount(mux)
+	}
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok\n"))
@@ -165,22 +171,40 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 
 	token := mcp.BearerToken(r)
 	if token == "" {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="mcp"`)
-		http.Error(w, "unauthorized — connect on the website first and use the API token as Bearer", http.StatusUnauthorized)
+		s.unauthorized(w)
 		return
 	}
-	accountID, err := s.accounts.LookupByToken(r.Context(), token)
+
+	// Prefer OAuth tokens; fall back to legacy manual API tokens from the website.
+	accountID, err := s.resolveAccount(r.Context(), token)
 	if err != nil {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="mcp"`)
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		s.unauthorized(w)
 		return
 	}
 
 	// Per-request service scoped to this account (aliases + tokens isolated).
 	svc := service.New(s.db, accountID).WithAccountStore(s.accounts)
-	srv := mcp.NewServer("mercadona-mcp", "0.2.0")
+	srv := mcp.NewServer("mercadona-mcp", "0.3.0")
 	tools.Register(srv, svc)
 	srv.HandleHTTP(w, r, nil) // already authenticated above
+}
+
+func (s *Server) resolveAccount(ctx context.Context, token string) (string, error) {
+	if s.oauth != nil {
+		if id, err := s.oauth.LookupAccount(ctx, token); err == nil {
+			return id, nil
+		}
+	}
+	return s.accounts.LookupByToken(ctx, token)
+}
+
+func (s *Server) unauthorized(w http.ResponseWriter) {
+	if s.oauth != nil {
+		w.Header().Set("WWW-Authenticate", s.oauth.WWWAuthenticate())
+	} else {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="mcp"`)
+	}
+	http.Error(w, "unauthorized — authorize via OAuth (add only the MCP URL) or paste a Bearer token from the website", http.StatusUnauthorized)
 }
 
 func (s *Server) allowConnect(ip string) bool {

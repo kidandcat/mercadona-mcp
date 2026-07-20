@@ -4,30 +4,24 @@ Unofficial [Model Context Protocol](https://modelcontextprotocol.io) server for 
 
 Two ways to use it:
 
-1. **Hosted (recommended for most people)** — open the website, enter Mercadona email + password + postal code, copy the MCP URL + token into Claude / Grok / Cursor. No install.
+1. **Hosted (recommended)** — add only `https://mercadona.cc/mcp`. OAuth opens the browser for Mercadona email + password + postal code. No install, no token copy-paste.
 2. **Local stdio** — run the binary yourself for full control.
 
 > **Unofficial.** Not affiliated with Mercadona. Talks to the same HTTP endpoints as the website. Bring your own credentials. Use at your own risk. Does **not** place orders.
 
 **Live:** [https://mercadona.cc](https://mercadona.cc)
 
-## Hosted service
+## Hosted service (OAuth)
 
-1. Go to [mercadona.cc](https://mercadona.cc)
-2. Enter your Mercadona account email, password, and delivery postal code
-3. Copy the **MCP URL** and **API token**
-4. Paste into your AI client:
+1. Add the MCP URL to your client — nothing else:
 
-### Claude Desktop / Claude.ai
+### Claude Desktop / Claude.ai / Cursor
 
 ```json
 {
   "mcpServers": {
     "mercadona": {
-      "url": "https://mercadona.cc/mcp",
-      "headers": {
-        "Authorization": "Bearer YOUR_TOKEN"
-      }
+      "url": "https://mercadona.cc/mcp"
     }
   }
 }
@@ -38,9 +32,17 @@ Two ways to use it:
 ```toml
 [mcp_servers.mercadona]
 url = "https://mercadona.cc/mcp"
-headers = { Authorization = "Bearer YOUR_TOKEN" }
 enabled = true
 ```
+
+```bash
+grok mcp add --transport http mercadona https://mercadona.cc/mcp
+```
+
+2. On first use the client opens a browser → enter Mercadona **email**, **password**, and **postal code** → authorize.
+3. The client stores the OAuth token; you can keep shopping by chat.
+
+**Manual fallback:** [mercadona.cc](https://mercadona.cc) still lets you mint a Bearer token if the client has no OAuth support.
 
 ### What the AI can do
 
