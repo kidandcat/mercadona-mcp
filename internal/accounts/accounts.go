@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -27,17 +26,12 @@ type Account struct {
 	LastUsedAt time.Time
 }
 
-// ConnectResult is returned once when a user connects (plaintext API token shown only here).
+// ConnectResult is returned when a Mercadona account is linked (OAuth authorize).
 type ConnectResult struct {
 	AccountID  string `json:"account_id"`
-	APIToken   string `json:"api_token"`
-	MCPURL     string `json:"mcp_url"`
 	PostalCode string `json:"postal_code"`
 	Warehouse  string `json:"warehouse,omitempty"`
 	EmailHint  string `json:"email_hint,omitempty"`
-	// Setup snippets for popular clients.
-	ClaudeJSON string `json:"claude_config_json"`
-	GrokTOML   string `json:"grok_config_toml"`
 }
 
 // Store persists accounts with encrypted Mercadona tokens.
@@ -90,11 +84,8 @@ func (s *Store) Connect(ctx context.Context, email, password, postalCode string)
 	if err != nil {
 		return nil, err
 	}
-	apiToken, err := randomHex(32)
-	if err != nil {
-		return nil, err
-	}
-	tokenHash := hashToken(apiToken)
+	// Placeholder hash — access is via OAuth tokens only (api_token_hash kept for schema).
+	tokenHash := hashToken(accountID + ":" + sess.CustomerID)
 
 	emailHint := maskEmail(email)
 	_, err = s.db.ExecContext(ctx, `
@@ -108,16 +99,11 @@ func (s *Store) Connect(ctx context.Context, email, password, postalCode string)
 		return nil, fmt.Errorf("save account: %w", err)
 	}
 
-	mcpURL := s.base + "/mcp"
 	return &ConnectResult{
 		AccountID:  accountID,
-		APIToken:   apiToken,
-		MCPURL:     mcpURL,
 		PostalCode: pc.PostalCode,
 		Warehouse:  pc.Warehouse,
 		EmailHint:  emailHint,
-		ClaudeJSON: claudeSnippet(mcpURL, apiToken),
-		GrokTOML:   grokSnippet(mcpURL, apiToken),
 	}, nil
 }
 
@@ -242,27 +228,4 @@ func maskEmail(email string) string {
 		return "***"
 	}
 	return email[:1] + "***" + email[at:]
-}
-
-func claudeSnippet(mcpURL, token string) string {
-	cfg := map[string]any{
-		"mcpServers": map[string]any{
-			"mercadona": map[string]any{
-				"url": mcpURL,
-				"headers": map[string]string{
-					"Authorization": "Bearer " + token,
-				},
-			},
-		},
-	}
-	b, _ := json.MarshalIndent(cfg, "", "  ")
-	return string(b)
-}
-
-func grokSnippet(mcpURL, token string) string {
-	return fmt.Sprintf(`[mcp_servers.mercadona]
-url = %q
-headers = { Authorization = "Bearer %s" }
-enabled = true
-`, mcpURL, token)
 }
